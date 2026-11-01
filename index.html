@@ -625,6 +625,30 @@ function searchRoutes(fromIdx, toIdx, searchTime, useLimited = false, mode = 'no
         // 種別変更で同一列車が継続する場合は乗換ではなく種別変更として扱う
         const isTypeChange = train1.nextTrain === train2;
 
+        // 1本目の列車がこの駅より先まで行く場合、終点での乗換の方が良いか確認
+        const train1Stops = train1.times.filter(x => x.arr || x.dep).sort((a,b) => a.station - b.station);
+        const train1Terminal = isDown ? train1Stops[train1Stops.length - 1]?.station : train1Stops[0]?.station;
+        let skipThisTransfer = false;
+        if (train1Terminal != null && train1Terminal !== z && !isTypeChange) {
+          // 終点で乗換可能な列車があるか簡易チェック
+          const terminalStop = train1.times.find(s => s.station === train1Terminal);
+          if (terminalStop && (terminalStop.arr || terminalStop.dep)) {
+            const terminalArr = terminalStop.arr || terminalStop.dep;
+            for (const t3 of commercial) {
+              if (t3 === train1) continue;
+              const t3Stop = t3.times.find(s => s.station === train1Terminal);
+              const t3Dest = t3.times.find(s => s.station === toIdx);
+              if (!t3Stop || !t3Dest || t3Stop.mode === 2) continue;
+              const t3Dep = t3Stop.dep || t3Stop.arr;
+              if (t3Dep && canConnect(terminalArr, t3Dep)) {
+                skipThisTransfer = true;
+                break;
+              }
+            }
+          }
+        }
+        if (skipThisTransfer) continue;
+
         results.push({
           type: isTypeChange ? 'typeChange' : 'transfer',
           legs: [
@@ -642,10 +666,11 @@ function searchRoutes(fromIdx, toIdx, searchTime, useLimited = false, mode = 'no
 
   // 2回乗換
   if (intermediates.length >= 2) {
-    for (let i = 0; i < intermediates.length; i++) {
-      for (let j = i + 1; j < intermediates.length; j++) {
-        const z1 = intermediates[i];
-        const z2 = intermediates[j];
+    const limitedInter = intermediates.slice(0, 25);
+    for (let i = 0; i < limitedInter.length; i++) {
+      for (let j = i + 1; j < limitedInter.length; j++) {
+        const z1 = limitedInter[i];
+        const z2 = limitedInter[j];
         for (const train1 of commercial) {
           const fStop = train1.times.find(s => s.station === fromIdx);
           const z1Stop = train1.times.find(s => s.station === z1);
@@ -695,14 +720,21 @@ function searchRoutes(fromIdx, toIdx, searchTime, useLimited = false, mode = 'no
     }
   }
 
-  // 直通より明らかに遅い乗換のみ除外（乗り続けた方が早い場合）
+  // 不要な乗換を除外
   const directs = results.filter(r => r.type === 'direct' || r.type === 'typeChange');
   const filtered = results.filter(r => {
-    if (r.type === 'direct' || r.type === 'typeChange') return true;
-    // 同じ出発時刻で直通がある場合のみ除外
+    if (r.type === 'direct') return true;
+    // 特急利用時：特急直通が1本でもあれば乗換・種別変更を除外
+    if (useLimited) {
+      const hasLimitedDirect = directs.some(d => d.type === 'direct' && isLimitedOrConnected(d.legs[0].train, data.types));
+      if (hasLimitedDirect && r.type !== 'direct') return false;
+    }
+    if (r.type === 'typeChange') return true;
+    // 同じ出発時刻（±30分）で直通の方が到着が早い場合のみ除外
     for (const d of directs) {
-      const depDiff = compareTime(r.totalDep, d.totalDep);
-      if (depDiff === 0) return false;
+      const depDiff = Math.abs(compareTime(r.totalDep, d.totalDep));
+      const arrDiff = compareTime(r.totalArr, d.totalArr);
+      if (depDiff <= 30 && arrDiff >= 0) return false;
     }
     return true;
   });
@@ -807,6 +839,12 @@ function renderResults(results, fromIdx, toIdx, mode = 'normal') {
       if (r.isTypeChange && i === 0 && r.transferStation != null) {
         const nextType = getTypeInfo(r.legs[1].train.type, types);
         changeNote = `<span class="change-note">（${stations[r.transferStation]?.name || ''}から${nextType.name}に変更）</span>`;
+      } else if (i === 0 && r.type === 'transfer' && leg.train.times) {
+        const stops = leg.train.times.filter(x => x.arr || x.dep).sort((a,b) => a.station - b.station);
+        const terminal = isDown ? stops[stops.length - 1]?.station : stops[0]?.station;
+        if (terminal != null && terminal !== leg.to) {
+          changeNote = `<span class="change-note">（${stations[terminal]?.name || ''}まで乗車可）</span>`;
+        }
       } else if (leg.train.nextTrain && leg.train.changeStation != null && !r.isTypeChange) {
         const nextType = getTypeInfo(leg.train.nextTrainType, types);
         changeNote = `<span class="change-note">（${stations[leg.train.changeStation]?.name || ''}から${nextType.name}に変更）</span>`;
